@@ -1,16 +1,20 @@
 const express = require('express');
 const axios = require('axios');
-const { BlobServiceClient } = require('@azure/storage-blob');
+const multer = require('multer');
+const pdfParse = require('pdf-parse');
 const path = require('path');
 const https = require('https');
-const pdf = require('pdf-parse');
+const fs = require('fs');
 require('dotenv').config();
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// 🔹 Postavljanje varijabli iz .env
+// Multer setup za upload
+const upload = multer({ dest: 'uploads/' });
+
+// Env varijable
 const azureOpenAiKey = process.env.AZURE_OPENAI_KEY;
 const azureOpenAiEndpoint = process.env.AZURE_OPENAI_ENDPOINT;
 const azureOpenAiDeployment = process.env.AZURE_OPENAI_DEPLOYMENT;
@@ -18,117 +22,250 @@ const searchEndpoint = process.env.AZURE_SEARCH_ENDPOINT;
 const searchIndexName = process.env.AZURE_SEARCH_INDEX;
 const searchApiKey = process.env.AZURE_SEARCH_API_KEY;
 
-// ✅ Pravilna API putanja za Azure OpenAI
+const azureCvEndpoint = process.env.AZURE_CV_ENDPOINT;
+const azureCvKey = process.env.AZURE_CV_KEY;
+
 const openAiApiUrl = `${azureOpenAiEndpoint}/openai/deployments/${azureOpenAiDeployment}/chat/completions?api-version=2023-07-01-preview`;
 
-// ✅ Ispravan HTTPS agent
 const httpsAgent = new https.Agent({
   minVersion: 'TLSv1.2',
   maxVersion: 'TLSv1.3',
   rejectUnauthorized: true,
 });
 
-// ✅ Funkcija za dohvaćanje relevantnih dokumenata iz Azure Cognitive Search
-async function fetchFromAzureSearch(query) {
-    try {
-        const response = await axios.post(
-            `${searchEndpoint}/indexes/${searchIndexName}/docs/search?api-version=2021-04-30-Preview`,
-            {
-                search: query,
-                top: 5, // broj najrelevantnijih rezultata
-            },
-            {
-                headers: {
-                    'Content-Type': 'application/json',
-                    'api-key': searchApiKey,
-                }
-            }
-        );
+// --- OCR funkcija za slike (Azure Computer Vision) ---
+async function ocrImageAzure(imagePath) {
+  try {
+    const imageData = fs.readFileSync(imagePath);
 
-        const hits = response.data.value;
-        const combinedText = hits.map(hit => hit.content || JSON.stringify(hit)).join('\n\n');
-        return combinedText;
+    const url = `${azureCvEndpoint}/vision/v3.2/ocr?language=unk&detectOrientation=true`;
 
-    } catch (err) {
-        console.error("Greška u Azure Search:", err.response?.data || err.message);
-        return "";
-    }
-}
+    const response = await axios.post(url, imageData, {
+      headers: {
+        'Ocp-Apim-Subscription-Key': azureCvKey,
+        'Content-Type': 'application/octet-stream',
+      },
+      httpsAgent,
+    });
 
-// ✅ Filtriranje relevantnih dijelova konteksta na temelju upita
-function filterRelevantContext(query, context) {
-    const relevantParts = context.split('\n').filter(part => part.toLowerCase().includes(query.toLowerCase())); 
-    return relevantParts.join('\n');
-}
-
-// ✅ Generiranje odgovora koristeći Azure OpenAI
-async function generateAzureOpenAIResponse(query, context) {
-    try {
-        const limitedContext = context.length > 20000 
-            ? context.substring(0, 20000) + "... [sadržaj skraćen]" 
-            : context;
-
-        // Pretraga ključnih riječi u dokumentima i filtriranje samo relevantnih informacija
-        const filteredContext = filterRelevantContext(query, limitedContext);
-        
-        const response = await axios.post(
-            openAiApiUrl,
-            {
-                model: "gpt-3.5-turbo", // Možeš promijeniti na drugi model ako je dostupan
-                messages: [
-                    { 
-                        role: "system", 
-                        content: "Ti si asistent koji koristi podatke pohranjene u Azure Cognitive Search-u. Tvoj zadatak je odgovarati korisnicima samo koristeći te podatke, i nikako ne koristiti informacije s interneta osim ako to nije izričito rečeno. Ako nemaš informacija, reci korisniku da ne znaš odgovor. Ako se upit odnosi na neki specifičan dokument, odgovori koristeći informacije iz tog dokumenta." 
-                    },
-                    { role: "user", content: query },
-                    { role: "assistant", content: filteredContext }
-                ],
-                max_tokens: 1000
-            },
-            { 
-                headers: { 
-                    'api-key': azureOpenAiKey, // Azure koristi 'api-key' umjesto 'Authorization'
-                    'Content-Type': 'application/json'
-                },
-                httpsAgent: httpsAgent
-            }
-        );
-
-        return response.data.choices[0].message.content;
-    } catch (error) {
-        console.error("Azure OpenAI greška:", error.response?.data || error.message);
-        return "Nažalost, trenutno ne mogu odgovoriti na pitanje. Pokušajte ponovno kasnije.";
-    }
-}
-
-// ✅ Chat endpoint
-app.post('/chat', async (req, res) => {
-    try {
-        if (!req.body.message?.trim()) {
-            return res.status(400).json({ error: "Poruka je obavezna" });
-        }
-
-        const userMessage = req.body.message.substring(0, 1000);
-        const documents = await fetchFromAzureSearch(userMessage); // Dohvati dokumente iz Azure Search
-        const botResponse = await generateAzureOpenAIResponse(userMessage, documents);
-        
-        res.json({ 
-            response: botResponse,
-            contextLength: documents.length 
+    // Parsiraj OCR rezultat u tekst
+    const regions = response.data.regions || [];
+    let text = "";
+    regions.forEach(region => {
+      region.lines.forEach(line => {
+        line.words.forEach(word => {
+          text += word.text + " ";
         });
-    } catch (error) {
-        console.error("Chat greška:", error);
-        res.status(500).json({ error: "Došlo je do greške na serveru" });
+        text += "\n";
+      });
+    });
+
+    return text.trim();
+  } catch (error) {
+    console.error("OCR greška:", error.response?.data || error.message);
+    return "";
+  }
+}
+
+// --- Endpoint za upload PDF ---
+app.post('/upload-pdf', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "Datoteka je obavezna" });
+
+  try {
+    const dataBuffer = fs.readFileSync(req.file.path);
+    const pdfData = await pdfParse(dataBuffer);
+
+    fs.unlinkSync(req.file.path);
+
+    res.json({ text: pdfData.text });
+  } catch (error) {
+    console.error("PDF parsiranje greška:", error);
+    res.status(500).json({ error: "Greška pri parsiranju PDF-a" });
+  }
+});
+
+// --- Endpoint za upload slike ---
+app.post('/upload-image', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "Slika je obavezna" });
+
+  try {
+    const text = await ocrImageAzure(req.file.path);
+
+    fs.unlinkSync(req.file.path);
+
+    res.json({ text });
+  } catch (error) {
+    console.error("OCR upload greška:", error);
+    res.status(500).json({ error: "Greška pri OCR-u slike" });
+  }
+});
+
+// --- Dohvat dokumenata iz Azure Search ---
+async function fetchFromAzureSearch(query) {
+  try {
+    const response = await axios.post(
+      `${searchEndpoint}/indexes/${searchIndexName}/docs/search?api-version=2021-04-30-Preview`,
+      {
+        search: query,
+        top: 7, // malo veći broj da imamo širi izbor dokumenata
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'api-key': searchApiKey,
+        }
+      }
+    );
+
+    const hits = response.data.value;
+
+    // Svaki dokument ima content i izvor (metadata)
+    return hits.map(hit => ({
+      content: hit.content || "",
+      source: hit.metadata_storage_name || hit.source || "Nepoznati izvor"
+    }));
+  } catch (err) {
+    console.error("Azure Search greška:", err.response?.data || err.message);
+    return [];
+  }
+}
+
+// --- Napredna filtracija relevantnih dokumenata ---
+// - uzima u obzir duljinu riječi, ignorira česte riječi, koristi stemming / lemmatization (pojednostavljeno)
+function filterRelevantDocuments(query, documents) {
+  const stopwords = new Set([
+    "i", "u", "na", "za", "je", "su", "se", "to", "od", "da", "ne", "a", "koji", "što",
+    "što", "kao", "ali", "ili", "pa", "ako", "te", "će", "što"
+  ]);
+
+  const queryWords = query
+    .toLowerCase()
+    .split(/\W+/)
+    .filter(w => w.length > 3 && !stopwords.has(w));
+
+  return documents.filter(doc => {
+    const text = doc.content.toLowerCase();
+    // Traži da se barem jedna ključna riječ pojavi u dokumentu
+    return queryWords.some(kw => text.includes(kw));
+  });
+}
+
+// --- Optimalno građenje konteksta s rezanjem i formatiranjem ---
+// - Pazimo da maksimalna dužina tokena ne bude prevelika
+// - Čistimo višestruke praznine, dodajemo jasne separatore
+function buildContextFromDocuments(documents, maxLength = 18000) {
+  let context = "";
+  for (const doc of documents) {
+    // Ukloni višestruke nove linije i suvišne razmake iz sadržaja
+    const cleanContent = doc.content
+      .replace(/\s+/g, " ")
+      .trim();
+
+    const segment = `${cleanContent}\nIzvor: ${doc.source}\n---\n`;
+
+    if ((context.length + segment.length) > maxLength) {
+      context += "... [sadržaj je skraćen zbog ograničenja duljine]\n";
+      break;
     }
+    context += segment;
+  }
+  return context.trim();
+}
+
+// --- Generiranje odgovora preko Azure OpenAI s poboljšanim promptom ---
+async function generateAzureOpenAIResponse(query, context) {
+  if (!context || context.trim() === "") {
+    return "Na temelju dostupnih dokumenata, ne mogu pronaći odgovor na to pitanje.";
+  }
+
+  try {
+    const response = await axios.post(
+      openAiApiUrl,
+      {
+        model: "gpt-3.5-turbo",
+        messages: [
+          {
+            role: "system",
+            content: `Ti si precizan, pouzdan i stručan chatbot specijaliziran za odgovore koristeći isključivo informacije iz dokumenata Filozofskog fakulteta u Osijeku. Ne smiješ koristiti nikakve druge izvore ili vlastito znanje.
+
+Ako informacije nisu dovoljne da bi dao pouzdan odgovor, jasno reci da nemaš dovoljno podataka.
+
+Odgovori jasno, sažeto i profesionalno.
+
+Uvijek navedi točan izvor za svaki ključni podatak ili tvrdnju, u formatu:
+"Izvor: [naziv dokumenta]"
+
+Ako je potrebno, sažmi ili parafraziraj sadržaj, ali bez izmišljanja činjenica.
+
+Nemoj nikada pretpostavljati ili dodavati informacije koje nisu u dostavljenom kontekstu.
+
+Kada daješ izvore nakon odgovora, ti izvori moraju biti točni, ne smiješ izmišljati imena izvora.
+
+NIKAKO ne smiješ davati krive informacije, samo isključivo podatke iz dokumenata.`
+
+          },
+          {
+            role: "user",
+            content: `Upit:\n${query}\n\nKontekst:\n${context}`
+          }
+        ],
+        max_tokens: 1000,
+        temperature: 0.6, // konzervativni, precizni odgovori
+        top_p: 1,
+        frequency_penalty: 0,
+        presence_penalty: 0,
+      },
+      {
+        headers: {
+          'api-key': azureOpenAiKey,
+          'Content-Type': 'application/json',
+        },
+        httpsAgent,
+      }
+    );
+
+    return response.data.choices[0].message.content.trim();
+  } catch (error) {
+    console.error("Azure OpenAI greška:", error.response?.data || error.message);
+    return "Nažalost, trenutno ne mogu odgovoriti na pitanje. Pokušajte ponovno kasnije.";
+  }
+}
+
+// --- Chat endpoint ---
+app.post('/chat', async (req, res) => {
+  try {
+    const userMessage = req.body.message?.trim();
+    if (!userMessage) return res.status(400).json({ error: "Poruka je obavezna" });
+
+    // Dohvati dokumente s Azure Search
+    const allDocuments = await fetchFromAzureSearch(userMessage);
+
+    // Filtriraj relevantne dokumente
+    const relevantDocs = filterRelevantDocuments(userMessage, allDocuments);
+
+    // Izgradi kontekst za model
+    const context = buildContextFromDocuments(relevantDocs);
+
+    // Generiraj odgovor
+    const answer = await generateAzureOpenAIResponse(userMessage, context);
+
+    res.json({
+      response: answer,
+      contextLength: context.length,
+      documentsCount: relevantDocs.length
+    });
+  } catch (error) {
+    console.error("Chat greška:", error);
+    res.status(500).json({ error: "Došlo je do greške na serveru" });
+  }
 });
 
-// ✅ Osnovne rute
+// --- Početna stranica ---
 app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
+  res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-// ✅ Pokretanje servera
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Server pokrenut na http://localhost:${PORT}`);
+  console.log(`Server pokrenut na http://localhost:${PORT}`);
 });
