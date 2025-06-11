@@ -206,7 +206,14 @@ NIKAKO ne smiješ davati krive informacije, samo isključivo podatke iz dokumena
           },
           {
             role: "user",
-            content: `Upit:\n${query}\n\nKontekst:\n${context}`
+            content: `Odgovori na sljedeće pitanje koristeći isključivo informacije iz danih dokumenata. Ako informacije nisu dostupne, reci da ne možeš pouzdano odgovoriti.
+
+            Pitanje:
+            ${query}
+
+            Dokumenti:
+            ${context}`
+
           }
         ],
         max_tokens: 1000,
