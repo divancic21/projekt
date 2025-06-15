@@ -127,7 +127,8 @@
                 });
 
                 if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
+                    const errorData = await response.json();
+                    throw new Error(`HTTP error! status: ${response.status}, message: ${errorData.error || 'Unknown error'}`);
                 }
 
                 const data = await response.json();
@@ -135,10 +136,17 @@
                 // Ukloni indikator tipkanja i prikaži odgovor
                 chatbox.removeChild(typingIndicator);
                 addMessage('bot', data.response || "Nisam mogao dobiti odgovor.");
+
+                // Ispis debug informacija u konzolu preglednika
+                console.log("Chat Response Data:", data);
+                console.log("All Documents Found by Search:", data.debugInfo.allDocumentsFoundBySearch);
+                console.log("Relevant Documents Used:", data.debugInfo.relevantDocumentsUsed);
+                console.log("Context Built Preview:", data.debugInfo.contextBuilt);
+
             } catch (error) {
                 console.error('Greška:', error);
                 chatbox.removeChild(typingIndicator);
-                addMessage('bot', "Došlo je do greške pri komunikaciji s botom. Pokušajte ponovno.");
+                addMessage('bot', `Došlo je do greške pri komunikaciji s botom: ${error.message}. Pokušajte ponovno.`);
             } finally {
                 sendButton.disabled = false;
                 userInput.focus();
